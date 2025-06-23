@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"drivio/pkg/config"
 	"drivio/pkg/gitlab"
@@ -20,6 +21,7 @@ var (
 	filePath       string
 	outputFile     string
 	validateOnly   bool
+	fetchWorkDir   string
 )
 
 // fetchCmd represents the fetch command
@@ -47,11 +49,17 @@ func init() {
 	fetchCmd.Flags().StringVar(&filePath, "file", "", "Path to the file in the repository")
 	fetchCmd.Flags().StringVar(&outputFile, "output", "", "Output file path (default: stdout)")
 	fetchCmd.Flags().BoolVar(&validateOnly, "validate-only", false, "Only validate connection and repository access")
+	fetchCmd.Flags().StringVar(&fetchWorkDir, "work-dir", ".drivio-work", "Working directory for downloaded files")
 
 	// Remove the required flag for token since it's optional for public repos
 }
 
 func runFetch(cmd *cobra.Command, args []string) error {
+	// Create work directory if it doesn't exist
+	if err := os.MkdirAll(fetchWorkDir, 0755); err != nil {
+		return fmt.Errorf("failed to create work directory: %w", err)
+	}
+
 	// Load configuration
 	cfg := config.LoadConfig()
 
@@ -117,23 +125,32 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	// Fetch the file
 	fmt.Printf("📄 Fetching file: %s from branch: %s\n", cfg.FilePath, cfg.Branch)
-	content, err := client.GetFile(ctx)
+	content, err := client.FetchWithProgress(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch file: %w", err)
 	}
 	fmt.Printf("✅ File fetched successfully (%d bytes)\n", len(content))
 
-	// Output the content
+	// Always save to work directory with a default name
+	defaultFileName := "fetched_file.yaml"
+	workFilePath := filepath.Join(fetchWorkDir, defaultFileName)
+	if err := os.WriteFile(workFilePath, content, 0644); err != nil {
+		return fmt.Errorf("failed to write file to work directory: %w", err)
+	}
+	fmt.Printf("💾 File saved to work directory: %s\n", workFilePath)
+
 	if outputFile != "" {
-		// Write to file
-		if err := os.WriteFile(outputFile, content, 0644); err != nil {
-			return fmt.Errorf("failed to write output file: %w", err)
+		// If a specific output file is specified, also write there and show content
+		if outputFile != workFilePath {
+			if err := os.WriteFile(outputFile, content, 0644); err != nil {
+				return fmt.Errorf("failed to write output file: %w", err)
+			}
+			fmt.Printf("💾 File also saved to: %s\n", outputFile)
 		}
-		fmt.Printf("💾 File saved to: %s\n", outputFile)
-	} else {
-		// Write to stdout
+		// Show content on stdout when --output is specified
 		fmt.Println(string(content))
 	}
+	// If no --output is specified, don't show content on stdout
 
 	return nil
 }

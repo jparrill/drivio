@@ -58,3 +58,6 @@ dist/
 # Local configuration files
 config.local.yaml
 config.local.yml
+
+# Drivio work directory (downloaded files and cloned repositories)
+.drivio-work/

@@ -11,6 +11,8 @@ A command-line interface tool designed to help manage and update production envi
 - 🐳 **Docker Support**: Containerized deployment options
 - 📄 **GitLab Integration**: Fetch configuration files from GitLab repositories
 - ✅ **Validation**: Validate connections and repository access
+- 📁 **Work Directory Management**: All downloaded files and cloned repositories are stored in a local work directory for easy cleanup
+- 🧹 **Easy Cleanup**: Built-in clean command to remove all temporary files
 
 ## Installation
 
@@ -60,6 +62,24 @@ drivio --version
 
 # Show available commands
 drivio --help
+```
+
+### Work Directory
+
+Drivio uses a local work directory (default: `.drivio-work`) to store all downloaded files and cloned repositories. This makes it easy to manage and clean up temporary files.
+
+```bash
+# Use custom work directory
+drivio fetch --work-dir /tmp/my-work-dir
+
+# Clean up work directory
+drivio clean
+
+# Clean up with custom directory
+drivio clean --work-dir /tmp/my-work-dir
+
+# Force cleanup without confirmation
+drivio clean --force
 ```
 
 ### Fetch Configuration Files
@@ -120,6 +140,77 @@ drivio fetch \
   --token $GITLAB_TOKEN \
   --repo team/project \
   --file config/app.yaml
+```
+
+### Generate Release Notes
+
+The `release-notes` command generates formatted release notes between two Git references (tags, commits, or branches).
+
+#### Basic Usage
+
+```bash
+# Generate release notes between tags
+drivio release-notes --from v1.0.0 --to v1.1.0
+
+# Generate from local repository
+drivio release-notes --repo /path/to/repo --from main --to develop
+
+# Generate from remote repository
+drivio release-notes --remote-url https://github.com/owner/repo.git --from v1.0.0 --to v1.1.0
+
+# Save to file
+drivio release-notes --from v1.0.0 --to v1.1.0 --output release-notes.md
+
+# Different output formats
+drivio release-notes --from v1.0.0 --to v1.1.0 --format json
+drivio release-notes --from v1.0.0 --to v1.1.0 --format text
+
+# Filter commit types
+drivio release-notes --from v1.0.0 --to v1.1.0 --include feat,fix
+drivio release-notes --from v1.0.0 --to v1.1.0 --exclude chore,docs
+```
+
+#### Examples
+
+```bash
+# Generate release notes for a major release
+drivio release-notes \
+  --remote-url https://github.com/openshift/hypershift.git \
+  --from v0.1.59 \
+  --to v0.1.63 \
+  --output hypershift-release-notes.md
+
+# Generate only features and fixes
+drivio release-notes \
+  --from v1.0.0 \
+  --to v1.1.0 \
+  --include feat,fix \
+  --format markdown
+
+# Generate from local repository with custom work directory
+drivio release-notes \
+  --repo /path/to/local/repo \
+  --from main \
+  --to feature-branch \
+  --work-dir /tmp/release-work
+```
+
+### Clean Up Work Directory
+
+The `clean` command helps you manage disk space by removing all files in the work directory.
+
+```bash
+# Clean default work directory with confirmation
+drivio clean
+
+# Clean custom work directory
+drivio clean --work-dir /tmp/my-work-dir
+
+# Force cleanup without confirmation
+drivio clean --force
+
+# Clean and see what will be deleted
+drivio clean --work-dir /tmp/large-work-dir
 ```
 
 ## Development
@@ -202,14 +293,20 @@ drivio/
 ├── README.md            # This file
 ├── LICENSE              # License file
 ├── example-config.yaml  # Example configuration file
+├── .drivio-work/        # Work directory (created automatically, ignored by git)
 └── pkg/
     ├── cmd/
     │   ├── root.go      # Root command implementation
-    │   └── fetch.go     # Fetch command implementation
+    │   ├── fetch.go     # Fetch command implementation
+    │   ├── release-notes.go # Release notes command implementation
+    │   └── clean.go     # Clean command implementation
     ├── config/
     │   └── config.go    # Configuration management
-    └── gitlab/
-        └── client.go    # GitLab API client
+    ├── gitlab/
+    │   └── client.go    # GitLab API client
+    └── git/
+        ├── analyzer.go  # Git repository analyzer
+        └── formatter.go # Release notes formatter
 ```
 
 ## Configuration
@@ -223,6 +320,15 @@ drivio/
 | `GITLAB_REPO_PATH` | `jparrill/drivio-config` | Repository path (owner/repo) |
 | `GITLAB_BRANCH` | `main` | Branch name |
 | `GITLAB_FILE_PATH` | `config/environment.yaml` | Path to file in repository |
+
+### Work Directory
+
+The work directory (default: `.drivio-work`) is used to store:
+- Downloaded configuration files from GitLab
+- Cloned repositories for release notes generation
+- Generated release notes files
+
+This directory is automatically created when needed and can be cleaned up using the `clean` command.
 
 ### GitLab Token
 
