@@ -1,0 +1,45 @@
+# Example configuration file for Drivio
+# This file simulates a production environment configuration
+
+environment:
+  name: "production"
+  region: "us-east-1"
+  version: "1.0.0"
+
+database:
+  host: "prod-db.example.com"
+  port: 5432
+  name: "drivio_prod"
+  ssl_mode: "require"
+
+api:
+  host: "0.0.0.0"
+  port: 8080
+  timeout: 30
+  rate_limit: 1000
+
+logging:
+  level: "info"
+  format: "json"
+  output: "/var/log/drivio"
+
+security:
+  jwt_secret: "${JWT_SECRET}"
+  cors_origins:
+    - "https://app.drivio.com"
+    - "https://admin.drivio.com"
+
+features:
+  enable_metrics: true
+  enable_tracing: false
+  maintenance_mode: false
+
+deployment:
+  replicas: 3
+  resources:
+    cpu: "500m"
+    memory: "1Gi"
+  health_check:
+    path: "/health"
+    interval: 30
+    timeout: 5

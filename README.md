@@ -9,6 +9,8 @@ A command-line interface tool designed to help manage and update production envi
 - 🛠️ **CLI Interface**: Easy-to-use command-line interface
 - 📦 **Cross-platform**: Works on Linux, macOS, and Windows
 - 🐳 **Docker Support**: Containerized deployment options
+- 📄 **GitLab Integration**: Fetch configuration files from GitLab repositories
+- ✅ **Validation**: Validate connections and repository access
 
 ## Installation
 
@@ -47,6 +49,8 @@ make install
 
 ## Usage
 
+### Basic Commands
+
 ```bash
 # Show help
 drivio --help
@@ -54,8 +58,68 @@ drivio --help
 # Show version
 drivio --version
 
-# Run a command
-drivio <command> [options]
+# Show available commands
+drivio --help
+```
+
+### Fetch Configuration Files
+
+The `fetch` command allows you to retrieve YAML configuration files from GitLab repositories.
+
+#### Basic Usage
+
+```bash
+# Fetch with required token
+drivio fetch --token YOUR_GITLAB_TOKEN
+
+# Fetch specific repository and file
+drivio fetch --token YOUR_TOKEN --repo owner/repo --file config/production.yaml
+
+# Fetch from specific branch
+drivio fetch --token YOUR_TOKEN --repo owner/repo --file config.yaml --branch develop
+
+# Save to file
+drivio fetch --token YOUR_TOKEN --repo owner/repo --file config.yaml --output local-config.yaml
+
+# Validate connection only
+drivio fetch --token YOUR_TOKEN --validate-only
+```
+
+#### Configuration Options
+
+You can configure defaults using environment variables:
+
+```bash
+export GITLAB_URL="https://gitlab.com"
+export GITLAB_TOKEN="your-gitlab-token"
+export GITLAB_REPO_PATH="owner/repo"
+export GITLAB_BRANCH="main"
+export GITLAB_FILE_PATH="config/environment.yaml"
+```
+
+#### Examples
+
+```bash
+# Fetch production config
+drivio fetch \
+  --token $GITLAB_TOKEN \
+  --repo mycompany/configs \
+  --file environments/production.yaml \
+  --branch main \
+  --output prod-config.yaml
+
+# Validate access to repository
+drivio fetch \
+  --token $GITLAB_TOKEN \
+  --repo mycompany/configs \
+  --validate-only
+
+# Fetch from custom GitLab instance
+drivio fetch \
+  --url "https://gitlab.company.com" \
+  --token $GITLAB_TOKEN \
+  --repo team/project \
+  --file config/app.yaml
 ```
 
 ## Development
@@ -137,10 +201,39 @@ drivio/
 ├── .gitignore           # Git ignore rules
 ├── README.md            # This file
 ├── LICENSE              # License file
+├── example-config.yaml  # Example configuration file
 └── pkg/
-    └── cmd/
-        └── root.go      # Root command implementation
+    ├── cmd/
+    │   ├── root.go      # Root command implementation
+    │   └── fetch.go     # Fetch command implementation
+    ├── config/
+    │   └── config.go    # Configuration management
+    └── gitlab/
+        └── client.go    # GitLab API client
 ```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GITLAB_URL` | `https://gitlab.com` | GitLab instance URL |
+| `GITLAB_TOKEN` | (required) | GitLab access token |
+| `GITLAB_REPO_PATH` | `jparrill/drivio-config` | Repository path (owner/repo) |
+| `GITLAB_BRANCH` | `main` | Branch name |
+| `GITLAB_FILE_PATH` | `config/environment.yaml` | Path to file in repository |
+
+### GitLab Token
+
+You need a GitLab access token with the following permissions:
+- `read_api` - To read repository files
+- `read_repository` - To access repository content
+
+To create a token:
+1. Go to GitLab → Settings → Access Tokens
+2. Create a new token with appropriate scopes
+3. Use the token with the `--token` flag or `GITLAB_TOKEN` environment variable
 
 ## Contributing
 
