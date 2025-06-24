@@ -8,8 +8,10 @@ import (
 
 	"drivio/pkg/config"
 	"drivio/pkg/gitlab"
+	"drivio/pkg/ui"
 
 	"github.com/spf13/cobra"
+	gitlabAPI "gitlab.com/gitlab-org/api/client-go"
 )
 
 var (
@@ -96,24 +98,25 @@ func runFetch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create GitLab client: %w", err)
 	}
 
-	// Create context
 	ctx := context.Background()
 
-	// Validate connection
-	if cfg.IsPublicRepository() && cfg.GitLabToken == "" {
-		fmt.Printf("🔍 Accessing public repository: %s\n", cfg.RepositoryPath)
-	} else {
-		fmt.Printf("🔍 Validating GitLab connection...\n")
-		if err := client.ValidateConnection(ctx); err != nil {
-			return fmt.Errorf("connection validation failed: %w", err)
+	// Step 1: Validate connection
+	if err := ui.RunSpinner("Validating GitLab connection...", func() error {
+		if cfg.IsPublicRepository() && cfg.GitLabToken == "" {
+			return nil // No validation needed for public repo
 		}
-		fmt.Printf("✅ GitLab connection validated successfully\n")
+		return client.ValidateConnection(ctx)
+	}); err != nil {
+		return fmt.Errorf("connection validation failed: %w", err)
 	}
 
-	// Get repository info
-	fmt.Printf("📁 Checking repository: %s\n", cfg.RepositoryPath)
-	project, err := client.GetRepositoryInfo(ctx)
-	if err != nil {
+	// Step 2: Get repository info
+	var project *gitlabAPI.Project
+	if err := ui.RunSpinner("Getting repository info...", func() error {
+		var err error
+		project, err = client.GetRepositoryInfo(ctx)
+		return err
+	}); err != nil {
 		return fmt.Errorf("failed to get repository info: %w", err)
 	}
 	fmt.Printf("✅ Repository found: %s\n", project.Name)
@@ -123,21 +126,26 @@ func runFetch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Fetch the file
-	fmt.Printf("📄 Fetching file: %s from branch: %s\n", cfg.FilePath, cfg.Branch)
-	content, err := client.FetchWithProgress(ctx)
-	if err != nil {
+	// Step 3: Fetch the file
+	var content []byte
+	if err := ui.RunSpinner("Fetching file...", func() error {
+		var err error
+		content, err = client.GetFile(ctx)
+		return err
+	}); err != nil {
 		return fmt.Errorf("failed to fetch file: %w", err)
 	}
 	fmt.Printf("✅ File fetched successfully (%d bytes)\n", len(content))
 
-	// Always save to work directory with a default name
+	// Step 4: Save to work directory
 	defaultFileName := "fetched_file.yaml"
 	workFilePath := filepath.Join(fetchWorkDir, defaultFileName)
-	if err := os.WriteFile(workFilePath, content, 0644); err != nil {
+	if err := ui.RunSpinner("Saving file...", func() error {
+		return os.WriteFile(workFilePath, content, 0644)
+	}); err != nil {
 		return fmt.Errorf("failed to write file to work directory: %w", err)
 	}
-	fmt.Printf("💾 File saved to work directory: %s\n", workFilePath)
+	fmt.Printf("💾 File saved successfully: %s\n", workFilePath)
 
 	if outputFile != "" {
 		// If a specific output file is specified, also write there and show content

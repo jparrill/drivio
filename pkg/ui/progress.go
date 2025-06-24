@@ -54,6 +54,7 @@ func (p ProgressBar) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ProgressMsg:
 		p.progress = msg.Progress
 		p.message = msg.Message
+		return p, nil
 	case CompleteMsg:
 		p.completed = true
 		p.error = msg.Error
@@ -99,8 +100,8 @@ func (p ProgressBar) View() string {
 		Foreground(lipgloss.Color("#868e96")).
 		Render(fmt.Sprintf("%3.0f%%", p.progress*100))
 
-	// Simple one-line progress bar with spacing
-	return fmt.Sprintf("\n\n%s %s %s", spinner, barStyle.Render(bar), progressText)
+	// Show the progress message above the bar
+	return fmt.Sprintf("\n%s\n%s %s %s", p.message, spinner, barStyle.Render(bar), progressText)
 }
 
 // NewProgressBar creates a new progress bar
