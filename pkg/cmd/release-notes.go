@@ -1,44 +1,56 @@
 package cmd
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
-
-	"drivio/pkg/git"
 
 	"github.com/spf13/cobra"
 )
 
 var (
 	// Release notes flags
-	repoPath            string
+	owner               string
+	repo                string
 	fromRef             string
 	toRef               string
 	releaseOutput       string
-	outputFormat        string
-	includeTypes        []string
-	excludeTypes        []string
-	remoteURL           string
 	releaseNotesWorkDir string
+	githubToken         string
 )
+
+// GitHubCommit represents a commit from GitHub API
+type GitHubCommit struct {
+	Sha    string `json:"sha"`
+	Commit struct {
+		Author struct {
+			Name  string    `json:"name"`
+			Email string    `json:"email"`
+			Date  time.Time `json:"date"`
+		} `json:"author"`
+		Message string `json:"message"`
+	} `json:"commit"`
+}
 
 // releaseNotesCmd represents the release-notes command
 var releaseNotesCmd = &cobra.Command{
 	Use:   "release-notes",
-	Short: "Generate release notes between two references",
-	Long: `Generate release notes between two references (tags, commits, or branches).
+	Short: "Generate release notes using GitHub API",
+	Long: `Generate release notes between two references using GitHub API directly.
 
-The command analyzes commits between two references and generates formatted release notes
-based on conventional commit messages.
+This command uses GitHub's API to fetch commits between two references and generates
+release notes without cloning the repository.
 
 Examples:
-  drivio release-notes --from v1.0.0 --to v1.1.0
-  drivio release-notes --from abc123 --to def456 --format json
-  drivio release-notes --from main --to develop --output release-notes.md
-  drivio release-notes --from v1.0.0 --to v1.1.0 --include feat,fix
-  drivio release-notes --remote-url https://gitlab.com/gitlab-org/gitlab-foss.git --from v16.0.0 --to v16.1.0`,
+  drivio release-notes --owner openshift --repo hypershift --from v0.1.59 --to v0.1.63
+  drivio release-notes --owner myorg --repo myrepo --from v1.0.0 --to v1.1.0 --output release-notes.md`,
 	RunE: runReleaseNotes,
 }
 
@@ -46,235 +58,183 @@ func init() {
 	rootCmd.AddCommand(releaseNotesCmd)
 
 	// Add flags
-	releaseNotesCmd.Flags().StringVar(&repoPath, "repo", ".", "Repository path (default: current directory)")
+	releaseNotesCmd.Flags().StringVar(&owner, "owner", "", "GitHub repository owner/organization")
+	releaseNotesCmd.Flags().StringVar(&repo, "repo", "", "GitHub repository name")
 	releaseNotesCmd.Flags().StringVar(&fromRef, "from", "", "From reference (tag, commit, or branch)")
 	releaseNotesCmd.Flags().StringVar(&toRef, "to", "", "To reference (tag, commit, or branch)")
 	releaseNotesCmd.Flags().StringVar(&releaseOutput, "output", "", "Output file path (default: stdout)")
-	releaseNotesCmd.Flags().StringVar(&outputFormat, "format", "markdown", "Output format (markdown, json, text)")
-	releaseNotesCmd.Flags().StringSliceVar(&includeTypes, "include", nil, "Include only specific commit types (e.g., feat,fix)")
-	releaseNotesCmd.Flags().StringSliceVar(&excludeTypes, "exclude", nil, "Exclude specific commit types (e.g., chore,docs)")
-	releaseNotesCmd.Flags().StringVar(&remoteURL, "remote-url", "", "Remote repository URL to clone and analyze (overrides --repo)")
-	releaseNotesCmd.Flags().StringVar(&releaseNotesWorkDir, "work-dir", ".drivio-work", "Working directory for cloned repositories and generated files")
+	releaseNotesCmd.Flags().StringVar(&releaseNotesWorkDir, "work-dir", ".drivio-work", "Working directory for generated files")
+	releaseNotesCmd.Flags().StringVar(&githubToken, "github-token", "", "GitHub token for authentication (optional)")
 
 	// Mark required flags
+	releaseNotesCmd.MarkFlagRequired("owner")
+	releaseNotesCmd.MarkFlagRequired("repo")
 	releaseNotesCmd.MarkFlagRequired("from")
 	releaseNotesCmd.MarkFlagRequired("to")
 }
 
+// loadEnvrc loads environment variables from .envrc file
+func loadEnvrc() error {
+	envrcPath := ".envrc"
+	if _, err := os.Stat(envrcPath); os.IsNotExist(err) {
+		return nil // .envrc doesn't exist, that's ok
+	}
+
+	file, err := os.Open(envrcPath)
+	if err != nil {
+		return fmt.Errorf("failed to open .envrc: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimPrefix(line, "export ")
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			// Remove quotes if present
+			value = strings.Trim(value, `"'`)
+			os.Setenv(key, value)
+		}
+	}
+
+	return scanner.Err()
+}
+
 func runReleaseNotes(cmd *cobra.Command, args []string) error {
+	// Load environment variables from .envrc
+	if err := loadEnvrc(); err != nil {
+		fmt.Printf("⚠️  Warning: failed to load .envrc: %v\n", err)
+	}
+
 	// Create work directory if it doesn't exist
 	if err := os.MkdirAll(releaseNotesWorkDir, 0755); err != nil {
 		return fmt.Errorf("failed to create work directory: %w", err)
 	}
 
-	var repoDir string
-	var cleanup func()
-
-	if remoteURL != "" {
-		// Create a unique subdirectory for this repository
-		timestamp := time.Now().Format("20060102-150405")
-		repoName := extractRepoName(remoteURL)
-		cloneDir := filepath.Join(releaseNotesWorkDir, fmt.Sprintf("%s-%s", repoName, timestamp))
-
-		if err := os.MkdirAll(cloneDir, 0755); err != nil {
-			return fmt.Errorf("failed to create clone directory: %w", err)
+	// Load GitHub token from environment if not provided via flag
+	if githubToken == "" {
+		githubToken = os.Getenv("GITHUB_TOKEN")
+		if githubToken == "" {
+			fmt.Println("⚠️  No GitHub token provided. Using unauthenticated requests (may hit rate limits)")
+		} else {
+			fmt.Println("🔑 Using GitHub token from environment")
 		}
-
-		fmt.Printf("🌐 Cloning remote repository: %s\n", remoteURL)
-
-		// Use the new progress bar for cloning
-		err := git.CloneWithProgress(remoteURL, cloneDir)
-		if err != nil {
-			os.RemoveAll(cloneDir)
-			return fmt.Errorf("failed to clone remote repository: %w", err)
-		}
-
-		fmt.Printf("🔍 Analyzing repository: %s\n", cloneDir)
-
-		repoDir = cloneDir
-		cleanup = func() {
-			fmt.Printf("🧹 Cleaning up cloned repository: %s\n", cloneDir)
-			os.RemoveAll(cloneDir)
-		}
-		defer cleanup()
 	} else {
-		repoDir = repoPath
+		fmt.Println("🔑 Using GitHub token from command line flag")
 	}
 
-	if repoDir == "." {
-		currentDir, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
+	fmt.Printf("📊 Generating release notes for %s/%s from %s to %s\n", owner, repo, fromRef, toRef)
+
+	// Get commits using GitHub API
+	commits, err := getCommitsBetween(owner, repo, fromRef, toRef, githubToken)
+	if err != nil {
+		return fmt.Errorf("failed to get commits: %w", err)
+	}
+
+	fmt.Printf("🔍 Found %d commits between references\n", len(commits))
+
+	// Only include merge commits whose body contains a line with the ticket format
+	var filteredCommits []string
+	ticketPattern := regexp.MustCompile(`^[A-Z]+-\d+:\s.+`)
+	for _, commit := range commits {
+		lines := strings.Split(commit.Commit.Message, "\n")
+		if len(lines) == 0 {
+			continue
 		}
-		repoDir = currentDir
+		subject := strings.TrimSpace(lines[0])
+
+		// Only process merge commits
+		if !strings.HasPrefix(subject, "Merge pull request") {
+			continue
+		}
+
+		// Search for ticket line in the rest of the message
+		for _, line := range lines[1:] {
+			line = strings.TrimSpace(line)
+			if ticketPattern.MatchString(line) {
+				filteredCommits = append(filteredCommits, commit.Sha[:8]+" "+line)
+				break
+			}
+		}
 	}
 
-	if _, err := os.Stat(filepath.Join(repoDir, ".git")); os.IsNotExist(err) {
-		return fmt.Errorf("not a git repository: %s", repoDir)
+	fmt.Printf("✅ Found %d merge commits with ticket format\n", len(filteredCommits))
+
+	// Generate release notes: only the hash and ticket line, one per line
+	var output strings.Builder
+	for _, ticketLine := range filteredCommits {
+		output.WriteString(ticketLine + "\n")
 	}
 
-	format := git.OutputFormat(outputFormat)
-	switch format {
-	case git.FormatMarkdown, git.FormatJSON, git.FormatText:
-		// Valid format
-	default:
-		return fmt.Errorf("unsupported output format: %s. Supported formats: markdown, json, text", outputFormat)
-	}
-
-	fmt.Printf("📊 Generating release notes from %s to %s\n", fromRef, toRef)
-
-	analyzer, err := git.NewAnalyzer(repoDir)
-	if err != nil {
-		return fmt.Errorf("failed to create analyzer: %w", err)
-	}
-
-	notes, err := analyzer.GenerateReleaseNotes(fromRef, toRef)
-	if err != nil {
-		return fmt.Errorf("failed to generate release notes: %w", err)
-	}
-
-	if len(includeTypes) > 0 || len(excludeTypes) > 0 {
-		notes.Commits = filterCommits(notes.Commits, includeTypes, excludeTypes)
-		notes.Statistics = calculateStatistics(notes.Commits)
-	}
-
-	fmt.Printf("✅ Found %d commits\n", notes.Statistics.Total)
-
-	formatter := git.NewFormatter(format)
-	formatted, err := formatter.Format(notes)
-	if err != nil {
-		return fmt.Errorf("failed to format release notes: %w", err)
-	}
-
-	// Always save to work directory with a default name
-	defaultFileName := fmt.Sprintf("release-notes-%s.%s", time.Now().Format("20060102-150405"), getFileExtension(outputFormat))
+	// Save to work directory
+	defaultFileName := fmt.Sprintf("release-notes-%s-%s-%s.md", owner, repo, fromRef)
 	workFilePath := filepath.Join(releaseNotesWorkDir, defaultFileName)
-	if err := os.WriteFile(workFilePath, []byte(formatted), 0644); err != nil {
+
+	if err := os.WriteFile(workFilePath, []byte(output.String()), 0644); err != nil {
 		return fmt.Errorf("failed to write file to work directory: %w", err)
 	}
 	fmt.Printf("💾 Release notes saved to work directory: %s\n", workFilePath)
 
 	if releaseOutput != "" {
-		// If a specific output file is specified, also write there and show content
+		// If a specific output file is specified, also write there
 		if releaseOutput != workFilePath {
-			if err := os.WriteFile(releaseOutput, []byte(formatted), 0644); err != nil {
+			if err := os.WriteFile(releaseOutput, []byte(output.String()), 0644); err != nil {
 				return fmt.Errorf("failed to write output file: %w", err)
 			}
 			fmt.Printf("💾 Release notes also saved to: %s\n", releaseOutput)
 		}
 		// Show content on stdout when --output is specified
-		fmt.Println(formatted)
+		fmt.Println(output.String())
 	}
-	// If no --output is specified, don't show content on stdout
 
 	return nil
 }
 
-// extractRepoName extracts the repository name from a Git URL
-func extractRepoName(url string) string {
-	// Remove .git extension if present
-	if len(url) > 4 && url[len(url)-4:] == ".git" {
-		url = url[:len(url)-4]
+// getCommitsBetween gets all commits between two references using GitHub API
+func getCommitsBetween(owner, repo, fromRef, toRef, token string) ([]GitHubCommit, error) {
+	// Use GitHub compare API to get commits between two references
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/compare/%s...%s", owner, repo, fromRef, toRef)
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+	if err != nil {
+		return nil, err
 	}
 
-	// Extract the last part of the path
-	parts := filepath.SplitList(url)
-	if len(parts) > 0 {
-		lastPart := parts[len(parts)-1]
-		// Handle URLs with slashes
-		if idx := filepath.Base(lastPart); idx != "" {
-			return idx
-		}
-		return lastPart
+	// Add headers
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", "drivio-release-notes")
+	if token != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	}
 
-	return "unknown-repo"
-}
-
-// getFileExtension returns the appropriate file extension for the output format
-func getFileExtension(format string) string {
-	switch format {
-	case "markdown":
-		return "md"
-	case "json":
-		return "json"
-	case "text":
-		return "txt"
-	default:
-		return "md"
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
 	}
-}
+	defer resp.Body.Close()
 
-// filterCommits filters commits based on include and exclude types
-func filterCommits(commits []git.CommitInfo, includeTypes, excludeTypes []string) []git.CommitInfo {
-	if len(includeTypes) == 0 && len(excludeTypes) == 0 {
-		return commits
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
 	}
 
-	var filtered []git.CommitInfo
-
-	for _, commit := range commits {
-		// Check if commit type should be included
-		if len(includeTypes) > 0 {
-			included := false
-			for _, includeType := range includeTypes {
-				if string(commit.Type) == includeType {
-					included = true
-					break
-				}
-			}
-			if !included {
-				continue
-			}
-		}
-
-		// Check if commit type should be excluded
-		if len(excludeTypes) > 0 {
-			excluded := false
-			for _, excludeType := range excludeTypes {
-				if string(commit.Type) == excludeType {
-					excluded = true
-					break
-				}
-			}
-			if excluded {
-				continue
-			}
-		}
-
-		filtered = append(filtered, commit)
+	var compareResult struct {
+		Commits []GitHubCommit `json:"commits"`
 	}
 
-	return filtered
-}
-
-// calculateStatistics recalculates statistics for filtered commits
-func calculateStatistics(commits []git.CommitInfo) git.CommitStatistics {
-	stats := git.CommitStatistics{}
-
-	for _, commit := range commits {
-		stats.Total++
-		switch commit.Type {
-		case git.CommitTypeFeature:
-			stats.Features++
-		case git.CommitTypeFix:
-			stats.Fixes++
-		case git.CommitTypeDocs:
-			stats.Docs++
-		case git.CommitTypeStyle:
-			stats.Style++
-		case git.CommitTypeRefactor:
-			stats.Refactor++
-		case git.CommitTypeTest:
-			stats.Test++
-		case git.CommitTypeChore:
-			stats.Chore++
-		case git.CommitTypeBreaking:
-			stats.Breaking++
-		default:
-			stats.Unknown++
-		}
+	if err := json.NewDecoder(resp.Body).Decode(&compareResult); err != nil {
+		return nil, err
 	}
 
-	return stats
+	return compareResult.Commits, nil
 }

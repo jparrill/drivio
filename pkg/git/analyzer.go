@@ -1,44 +1,21 @@
 package git
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"regexp"
+	"net/http"
 	"strings"
 	"time"
-
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
-)
-
-// CommitType represents the type of a commit
-type CommitType string
-
-const (
-	CommitTypeFeature  CommitType = "feat"
-	CommitTypeFix      CommitType = "fix"
-	CommitTypeDocs     CommitType = "docs"
-	CommitTypeStyle    CommitType = "style"
-	CommitTypeRefactor CommitType = "refactor"
-	CommitTypeTest     CommitType = "test"
-	CommitTypeChore    CommitType = "chore"
-	CommitTypeBreaking CommitType = "breaking"
-	CommitTypeUnknown  CommitType = "unknown"
 )
 
 // CommitInfo represents information about a commit
 type CommitInfo struct {
-	Hash     string
-	Author   string
-	Email    string
-	Date     time.Time
-	Message  string
-	Type     CommitType
-	Scope    string
-	Subject  string
-	Body     string
-	Breaking bool
-	Footer   string
+	Hash    string
+	Author  string
+	Email   string
+	Date    time.Time
+	Subject string
 }
 
 // ReleaseNotes represents the generated release notes
@@ -54,249 +31,186 @@ type ReleaseNotes struct {
 
 // CommitStatistics represents statistics about commits
 type CommitStatistics struct {
-	Total    int
-	Features int
-	Fixes    int
-	Docs     int
-	Style    int
-	Refactor int
-	Test     int
-	Chore    int
-	Breaking int
-	Unknown  int
+	Total int
 }
 
-// Analyzer represents a Git commit analyzer
+// GitHubCommit represents a commit from GitHub API
+type GitHubCommit struct {
+	Sha    string `json:"sha"`
+	Commit struct {
+		Author struct {
+			Name  string    `json:"name"`
+			Email string    `json:"email"`
+			Date  time.Time `json:"date"`
+		} `json:"author"`
+		Message string `json:"message"`
+	} `json:"commit"`
+}
+
+// OutputFormat represents the output format for release notes
+type OutputFormat string
+
+const (
+	FormatMarkdown OutputFormat = "markdown"
+	FormatJSON     OutputFormat = "json"
+	FormatText     OutputFormat = "text"
+)
+
+// Formatter represents a release notes formatter
+type Formatter struct {
+	format OutputFormat
+}
+
+// NewFormatter creates a new formatter with the specified format
+func NewFormatter(format OutputFormat) *Formatter {
+	return &Formatter{format: format}
+}
+
+// Format formats release notes according to the specified format
+func (f *Formatter) Format(notes *ReleaseNotes) (string, error) {
+	switch f.format {
+	case FormatMarkdown:
+		return f.formatMarkdown(notes)
+	case FormatJSON:
+		return f.formatJSON(notes)
+	case FormatText:
+		return f.formatText(notes)
+	default:
+		return "", fmt.Errorf("unsupported format: %s", f.format)
+	}
+}
+
+// formatMarkdown formats release notes as Markdown
+func (f *Formatter) formatMarkdown(notes *ReleaseNotes) (string, error) {
+	var sb strings.Builder
+
+	// Formato exacto del script notes.go de HyperShift
+	for _, commit := range notes.Commits {
+		sb.WriteString(fmt.Sprintf("%s %s\n", commit.Hash[:8], commit.Subject))
+	}
+
+	return sb.String(), nil
+}
+
+// formatJSON formats release notes as JSON
+func (f *Formatter) formatJSON(notes *ReleaseNotes) (string, error) {
+	data, err := json.MarshalIndent(notes, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+	return string(data), nil
+}
+
+// formatText formats release notes as plain text
+func (f *Formatter) formatText(notes *ReleaseNotes) (string, error) {
+	var sb strings.Builder
+
+	// Formato exacto del script notes.go de HyperShift
+	for _, commit := range notes.Commits {
+		sb.WriteString(fmt.Sprintf("%s %s\n", commit.Hash[:8], commit.Subject))
+	}
+
+	return sb.String(), nil
+}
+
+// Analyzer represents a GitHub commit analyzer
 type Analyzer struct {
-	repo *git.Repository
+	client  *http.Client
+	baseURL string
 }
 
-// NewAnalyzer creates a new Git commit analyzer
-func NewAnalyzer(repoPath string) (*Analyzer, error) {
-	repo, err := git.PlainOpen(repoPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-
+// NewAnalyzer creates a new GitHub commit analyzer
+func NewAnalyzer() *Analyzer {
 	return &Analyzer{
-		repo: repo,
-	}, nil
+		client:  &http.Client{Timeout: 30 * time.Second},
+		baseURL: "https://api.github.com",
+	}
 }
 
-// GenerateReleaseNotes generates release notes between two references
-func (a *Analyzer) GenerateReleaseNotes(fromRef, toRef string) (*ReleaseNotes, error) {
-	// Get the commits
-	fromHash, err := a.resolveReference(fromRef)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve from reference '%s': %w", fromRef, err)
-	}
-
-	toHash, err := a.resolveReference(toRef)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve to reference '%s': %w", toRef, err)
-	}
-
-	// Get commits between the two references
-	commits, err := a.getCommitsBetween(fromHash, toHash)
+// GenerateReleaseNotes generates release notes between two references using GitHub API
+func (a *Analyzer) GenerateReleaseNotes(owner, repo, fromRef, toRef string) (*ReleaseNotes, error) {
+	// Get commits between the two references using GitHub API
+	commits, err := a.getCommitsBetween(owner, repo, fromRef, toRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commits between references: %w", err)
 	}
 
-	// Analyze commits
-	analyzedCommits := make([]CommitInfo, 0, len(commits))
+	analyzedCommits := make([]CommitInfo, 0)
 	stats := CommitStatistics{}
 
+	fmt.Printf("🔍 Found %d total commits between references\n", len(commits))
+
+	// El API de GitHub los devuelve en orden del más antiguo al más reciente, pero lo aseguramos
 	for _, commit := range commits {
-		commitInfo := a.analyzeCommit(commit)
-		// Filtrar los commits cuyo subject empiece por 'Merge pull request'
-		if strings.HasPrefix(commitInfo.Subject, "Merge pull request") {
+		// Excluir merges
+		lines := strings.Split(commit.Commit.Message, "\n")
+		if len(lines) == 0 {
 			continue
 		}
-		analyzedCommits = append(analyzedCommits, commitInfo)
-
-		// Update statistics
-		stats.Total++
-		switch commitInfo.Type {
-		case CommitTypeFeature:
-			stats.Features++
-		case CommitTypeFix:
-			stats.Fixes++
-		case CommitTypeDocs:
-			stats.Docs++
-		case CommitTypeStyle:
-			stats.Style++
-		case CommitTypeRefactor:
-			stats.Refactor++
-		case CommitTypeTest:
-			stats.Test++
-		case CommitTypeChore:
-			stats.Chore++
-		case CommitTypeBreaking:
-			stats.Breaking++
-		default:
-			stats.Unknown++
+		subject := strings.TrimSpace(lines[0])
+		if strings.HasPrefix(subject, "Merge pull request") {
+			continue
 		}
+
+		commitInfo := CommitInfo{
+			Hash:    commit.Sha,
+			Author:  commit.Commit.Author.Name,
+			Email:   commit.Commit.Author.Email,
+			Date:    commit.Commit.Author.Date,
+			Subject: strings.TrimSpace(commit.Commit.Message), // Mensaje completo
+		}
+		analyzedCommits = append(analyzedCommits, commitInfo)
 	}
+
+	stats.Total = len(analyzedCommits)
 
 	return &ReleaseNotes{
 		FromRef:     fromRef,
 		ToRef:       toRef,
-		FromHash:    fromHash.String(),
-		ToHash:      toHash.String(),
+		FromHash:    "",
+		ToHash:      "",
 		GeneratedAt: time.Now(),
 		Commits:     analyzedCommits,
 		Statistics:  stats,
 	}, nil
 }
 
-// resolveReference resolves a reference to a commit hash
-func (a *Analyzer) resolveReference(ref string) (plumbing.Hash, error) {
-	// Try to resolve as a reference first
-	reference, err := a.repo.Reference(plumbing.ReferenceName(ref), true)
-	if err == nil {
-		return reference.Hash(), nil
-	}
+// getCommitsBetween gets all commits between two references using GitHub API
+func (a *Analyzer) getCommitsBetween(owner, repo, fromRef, toRef string) ([]GitHubCommit, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", a.baseURL, owner, repo, fromRef, toRef)
 
-	// Try to resolve as a tag
-	tag, err := a.repo.Tag(ref)
-	if err == nil {
-		return tag.Hash(), nil
-	}
+	fmt.Printf("🔗 Calling GitHub API: %s\n", url)
 
-	// Try to resolve as a commit hash
-	if len(ref) >= 7 {
-		hash := plumbing.NewHash(ref)
-		if hash != plumbing.ZeroHash {
-			return hash, nil
-		}
-	}
-
-	return plumbing.ZeroHash, fmt.Errorf("could not resolve reference: %s", ref)
-}
-
-// getCommitsBetween gets all commits between two hashes
-func (a *Analyzer) getCommitsBetween(from, to plumbing.Hash) ([]*object.Commit, error) {
-	var commits []*object.Commit
-
-	// Create an iterator for commits from 'to' to 'from'
-	commitIter, err := a.repo.Log(&git.LogOptions{
-		From: to,
-	})
+	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer commitIter.Close()
 
-	// Collect commits until we reach the 'from' commit
-	err = commitIter.ForEach(func(commit *object.Commit) error {
-		// Stop when we reach the 'from' commit
-		if commit.Hash == from {
-			return fmt.Errorf("found from commit")
-		}
+	// Add headers for better rate limiting
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", "drivio-release-notes")
 
-		// Add the commit to our list
-		commits = append(commits, commit)
-		return nil
-	})
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-	// Check if we stopped because we found the 'from' commit
-	if err != nil && err.Error() != "found from commit" {
+	fmt.Printf("📡 GitHub API response status: %d\n", resp.StatusCode)
+
+	if resp.StatusCode != http.StatusOK {
+		// Read the response body to get more details about the error
+		body, _ := json.Marshal(resp.Body)
+		return nil, fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var compareResult struct {
+		Commits []GitHubCommit `json:"commits"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&compareResult); err != nil {
 		return nil, err
 	}
 
-	// Reverse the commits to get them in chronological order
-	for i, j := 0, len(commits)-1; i < j; i, j = i+1, j-1 {
-		commits[i], commits[j] = commits[j], commits[i]
-	}
-
-	return commits, nil
-}
-
-// analyzeCommit analyzes a single commit and extracts information
-func (a *Analyzer) analyzeCommit(commit *object.Commit) CommitInfo {
-	info := CommitInfo{
-		Hash:    commit.Hash.String(),
-		Author:  commit.Author.Name,
-		Email:   commit.Author.Email,
-		Date:    commit.Author.When,
-		Message: commit.Message,
-	}
-
-	// Parse conventional commit format
-	info.Type, info.Scope, info.Subject, info.Body, info.Footer, info.Breaking = a.parseConventionalCommit(commit.Message)
-
-	return info
-}
-
-// parseConventionalCommit parses a conventional commit message
-func (a *Analyzer) parseConventionalCommit(message string) (CommitType, string, string, string, string, bool) {
-	lines := strings.Split(message, "\n")
-	if len(lines) == 0 {
-		return CommitTypeUnknown, "", "", "", "", false
-	}
-
-	// Parse the first line (header)
-	header := strings.TrimSpace(lines[0])
-
-	// Conventional commit regex: type(scope): description
-	re := regexp.MustCompile(`^(\w+)(?:\(([^)]+)\))?:\s*(.+)$`)
-	matches := re.FindStringSubmatch(header)
-
-	if len(matches) < 4 {
-		return CommitTypeUnknown, "", header, "", "", false
-	}
-
-	commitType := CommitType(strings.ToLower(matches[1]))
-	scope := matches[2]
-	subject := matches[3]
-
-	// Check for breaking changes
-	breaking := false
-	if strings.Contains(strings.ToLower(header), "breaking change") {
-		breaking = true
-		commitType = CommitTypeBreaking
-	}
-
-	// Parse body and footer
-	var body, footer strings.Builder
-	inFooter := false
-
-	for i := 1; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-
-		if line == "" {
-			continue
-		}
-
-		// Check if this is a footer line
-		if strings.Contains(line, ":") && !inFooter {
-			// Check if previous line was empty (footer separator)
-			if i > 1 && strings.TrimSpace(lines[i-1]) == "" {
-				inFooter = true
-			}
-		}
-
-		if inFooter {
-			if footer.Len() > 0 {
-				footer.WriteString("\n")
-			}
-			footer.WriteString(line)
-		} else {
-			if body.Len() > 0 {
-				body.WriteString("\n")
-			}
-			body.WriteString(line)
-		}
-	}
-
-	// Check for breaking changes in body or footer
-	if strings.Contains(strings.ToLower(body.String()), "breaking change") ||
-		strings.Contains(strings.ToLower(footer.String()), "breaking change") {
-		breaking = true
-		if commitType != CommitTypeBreaking {
-			commitType = CommitTypeBreaking
-		}
-	}
-
-	return commitType, scope, subject, body.String(), footer.String(), breaking
+	return compareResult.Commits, nil
 }

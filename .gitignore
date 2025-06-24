@@ -59,5 +59,9 @@ dist/
 config.local.yaml
 config.local.yml
 
+# Environment variables
+.env
+.envrc
+
 # Drivio work directory (downloaded files and cloned repositories)
 .drivio-work/
